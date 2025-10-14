@@ -20,11 +20,11 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Conexión a MongoDB - CONFIGURADO PARA PRODUCCIÓN
+# Conexión a MongoDB
 # ---------------------------
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://usuario:password@cluster.mongodb.net/RetoMate?retryWrites=true&w=majority")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
-db = client["RetoMate"]
+db = client["RetoMates"]
 
 progreso_chatbot_col = db["progreso_chatbot"]
 respuestas_col = db["respuestas"]
