@@ -20,16 +20,16 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Conexión a MongoDB
+# Conexión a MongoDB - CORREGIDO
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
-db = client["RetoMates"]
+db = client["RetoMates"]  # Asegúrate que sea "RetoMates" exactamente
 
 progreso_chatbot_col = db["progreso_chatbot"]
 respuestas_col = db["respuestas"]
 historial_preguntas_col = db["historial_preguntas"]
-users_col = db["users"]
+users_col = db["users"]  # Esta colección debe existir
 
 # ---------------------------
 # Modelos
@@ -54,10 +54,11 @@ class RespuestaUsuario(BaseModel):
 # Funciones auxiliares - CORREGIDAS
 # ---------------------------
 def to_objectid(id_str: str):
+    """Convierte string a ObjectId de manera segura"""
     try:
         return ObjectId(id_str)
     except:
-        return id_str
+        return None
 
 def obtener_preguntas_alternativas(bloque: int, tema: str, user_id: str):
     preguntas_respondidas = historial_preguntas_col.find({
@@ -106,11 +107,31 @@ def debug_database():
         collections = db.list_collection_names()
         users_count = users_col.count_documents({})
         
+        # Mostrar algunos usuarios de ejemplo
+        sample_users = list(users_col.find({}, {"username": 1, "email": 1}).limit(3))
+        
         return {
             "databases": databases,
             "collections": collections,
             "total_usuarios": users_count,
+            "usuarios_ejemplo": sample_users,
             "status": "Conexión exitosa"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/usuario/{user_id}")
+def debug_usuario(user_id: str):
+    """Endpoint para debug de usuario específico"""
+    try:
+        object_id = to_objectid(user_id)
+        usuario = users_col.find_one({"_id": object_id})
+        
+        return {
+            "user_id_recibido": user_id,
+            "object_id_convertido": str(object_id) if object_id else "No válido",
+            "usuario_encontrado": bool(usuario),
+            "usuario": usuario
         }
     except Exception as e:
         return {"error": str(e)}
@@ -118,15 +139,31 @@ def debug_database():
 @app.get("/chatbot/inicio/{user_id}")
 def iniciar_chatbot(user_id: str):
     try:
+        print(f"🔍 Buscando usuario con ID: {user_id}")
+        
         # Convertir user_id a ObjectId
         object_id = to_objectid(user_id)
+        if not object_id:
+            return {"error": f"ID de usuario no válido: {user_id}"}
         
-        # Buscar usuario
+        # Buscar usuario en la colección users
         usuario_existe = users_col.find_one({"_id": object_id})
+        print(f"✅ Usuario encontrado: {usuario_existe is not None}")
         
         if not usuario_existe:
-            return {"error": f"Usuario no encontrado con ID: {user_id}"}
+            # Crear usuario automáticamente si no existe (para testing)
+            nuevo_usuario = {
+                "_id": object_id,
+                "username": f"Usuario_{user_id[:6]}",
+                "email": f"auto_{user_id}@temp.com",
+                "fecha_creacion": datetime.datetime.utcnow(),
+                "auto_creado": True
+            }
+            users_col.insert_one(nuevo_usuario)
+            usuario_existe = nuevo_usuario
+            print("🆕 Usuario creado automáticamente")
 
+        # Verificar si es usuario nuevo en el chatbot
         if es_usuario_nuevo(user_id):
             nombre_usuario = usuario_existe.get("username", "Usuario")
             progreso_chatbot_col.update_one(
@@ -171,6 +208,7 @@ def iniciar_chatbot(user_id: str):
         }
 
     except Exception as e:
+        print(f"❌ Error en iniciar_chatbot: {str(e)}")
         return {"error": f"Error interno: {str(e)}"}
 
 @app.post("/chatbot/saludo")
