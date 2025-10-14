@@ -2,17 +2,15 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from pymongo import MongoClient
 from bson import ObjectId
-from fastapi.middleware.cors import CORSMiddleware
 import datetime
 import random
 import os
-from preguntas import preguntas  # tu archivo de preguntas
+from fastapi.middleware.cors import CORSMiddleware
+from preguntas import preguntas  
 
-# ---------------------------
-# Configuración de FastAPI
-# ---------------------------
 app = FastAPI()
 
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,11 +20,11 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Conexión a MongoDB
+# Conexión a MongoDB - CONFIGURADO PARA PRODUCCIÓN
 # ---------------------------
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://usuario:password@cluster.mongodb.net/RetoMate?retryWrites=true&w=majority")
 client = MongoClient(MONGO_URI)
-db = client["RetoMates"]
+db = client["RetoMate"]
 
 progreso_chatbot_col = db["progreso_chatbot"]
 respuestas_col = db["respuestas"]
@@ -36,6 +34,10 @@ users_col = db["users"]
 # ---------------------------
 # Modelos
 # ---------------------------
+class Saludo(BaseModel):
+    user_id: str
+    texto: str
+
 class SeleccionBloque(BaseModel):
     user_id: str
     bloque: int
@@ -57,6 +59,26 @@ def to_objectid(id_str: str):
     except:
         return id_str
 
+def obtener_preguntas_alternativas(bloque: int, tema: str, user_id: str):
+    preguntas_respondidas = historial_preguntas_col.find({
+        "id_usuario": user_id,
+        "bloque": bloque,
+        "tema": tema
+    }).distinct("pregunta")
+
+    todas_preguntas = preguntas[bloque][tema]
+    preguntas_disponibles = [p for p in todas_preguntas if p["pregunta"] not in preguntas_respondidas]
+
+    if len(preguntas_disponibles) < 5 and len(todas_preguntas) >= 5:
+        preguntas_respondidas_disponibles = [p for p in todas_preguntas if p["pregunta"] in preguntas_respondidas]
+        random.shuffle(preguntas_respondidas_disponibles)
+        preguntas_disponibles.extend(preguntas_respondidas_disponibles[:5 - len(preguntas_disponibles)])
+
+    if not preguntas_disponibles:
+        return random.sample(todas_preguntas, min(5, len(todas_preguntas)))
+
+    return random.sample(preguntas_disponibles, min(5, len(preguntas_disponibles)))
+
 def es_usuario_nuevo(user_id: str) -> bool:
     return progreso_chatbot_col.find_one({"id_usuario": user_id}) is None
 
@@ -69,41 +91,22 @@ def obtener_nombre_usuario(user_id: str) -> str:
         return progreso["nombre"]
     return "Usuario"
 
-def obtener_preguntas(bloque: int, tema: str, user_id: str):
-    """Devuelve 5 preguntas no respondidas por el usuario."""
-    preguntas_respondidas = historial_preguntas_col.find({
-        "id_usuario": user_id,
-        "bloque": bloque,
-        "tema": tema
-    }).distinct("pregunta")
-
-    todas = preguntas[bloque][tema]
-    disponibles = [p for p in todas if p["pregunta"] not in preguntas_respondidas]
-
-    if not disponibles:
-        return random.sample(todas, min(5, len(todas)))
-
-    if len(disponibles) < 5:
-        faltan = 5 - len(disponibles)
-        extras = [p for p in todas if p["pregunta"] in preguntas_respondidas][:faltan]
-        disponibles.extend(extras)
-
-    return random.sample(disponibles, min(5, len(disponibles)))
-
 # ---------------------------
-# ENDPOINTS
+# Endpoints de chatbot
 # ---------------------------
+@app.get("/")
+def read_root():
+    return {"message": "Chatbot API funcionando correctamente"}
 
 @app.get("/chatbot/inicio/{user_id}")
 def iniciar_chatbot(user_id: str):
+    # Usuario real
     usuario_existe = users_col.find_one({"_id": to_objectid(user_id)})
-
-    # Si no existe en users → demo o error
-    if not usuario_existe and not user_id.startswith("demo_user_"):
+    if not usuario_existe:
         return {"error": "Usuario no encontrado"}
 
     if es_usuario_nuevo(user_id):
-        nombre_usuario = usuario_existe.get("username", "Usuario") if usuario_existe else "Usuario Demo"
+        nombre_usuario = usuario_existe.get("username", "Usuario")
         progreso_chatbot_col.update_one(
             {"id_usuario": user_id},
             {"$set": {
@@ -126,14 +129,13 @@ def iniciar_chatbot(user_id: str):
             "usuario_nuevo": True
         }
 
-    # Usuario ya tiene progreso
+    # Usuario existente
     progreso = progreso_chatbot_col.find_one({"id_usuario": user_id})
-    nombre = obtener_nombre_usuario(user_id)
-    mensaje = (
-        f"¡Bienvenido de vuelta {nombre}! "
-        f"Estabas practicando {progreso.get('tema', 'un tema pendiente')} "
-        f"en el Bloque {progreso.get('bloque', 'N/A')}."
-    )
+    nombre_usuario = obtener_nombre_usuario(user_id)
+    if progreso.get("tema"):
+        mensaje = f"¡Bienvenido de vuelta {nombre_usuario}! Estabas practicando {progreso['tema']} en el Bloque {progreso['bloque']}."
+    else:
+        mensaje = f"¡Bienvenido de vuelta {nombre_usuario}! ¿Qué quieres practicar hoy?"
     return {
         "mensaje": mensaje,
         "siguiente": {"endpoint": "/chatbot/seleccionar_bloque"},
@@ -142,120 +144,199 @@ def iniciar_chatbot(user_id: str):
         "usuario_nuevo": False
     }
 
-# ---------------------------
-# Selección de bloque
-# ---------------------------
-@app.post("/chatbot/seleccionar_bloque")
-def seleccionar_bloque(data: SeleccionBloque):
-    bloques_validos = [1, 2, 3, 4]
-    if data.bloque not in bloques_validos:
-        return {"mensaje": "Selecciona un bloque válido (1 al 4)"}
-
+@app.post("/chatbot/saludo")
+def saludo_usuario(saludo: Saludo):
+    usuario_existe = users_col.find_one({"_id": to_objectid(saludo.user_id)})
+    if not usuario_existe:
+        return {"error": "Usuario no encontrado"}
+    
     progreso_chatbot_col.update_one(
-        {"id_usuario": data.user_id},
-        {"$set": {"bloque": data.bloque, "tema": None}},
+        {"id_usuario": saludo.user_id},
+        {"$set": {
+            "nombre": saludo.texto,
+            "fecha_ultima_interaccion": datetime.datetime.utcnow()
+        }},
         upsert=True
     )
 
-    temas = list(preguntas[data.bloque].keys())
     return {
-        "mensaje": f"Excelente 🎯. Estás en el Bloque {data.bloque}. Elige un tema:",
-        "opciones": temas,
+        "mensaje": f"¡Hola {saludo.texto}! ¿Qué bloque quieres practicar hoy?",
+        "opciones": ["1", "2", "3", "4"],
+        "siguiente": {"endpoint": "/chatbot/seleccionar_bloque"}
+    }
+
+@app.post("/chatbot/seleccionar_bloque")
+def seleccionar_bloque(seleccion: SeleccionBloque):
+    if seleccion.bloque not in preguntas:
+        return {"error": "Bloque no válido. Por favor selecciona un bloque entre 1 y 4"}
+
+    progreso_chatbot_col.update_one(
+        {"id_usuario": seleccion.user_id},
+        {"$set": {
+            "bloque": seleccion.bloque,
+            "fecha_ultima_interaccion": datetime.datetime.utcnow()
+        }}
+    )
+
+    temas_disponibles = list(preguntas[seleccion.bloque].keys())
+
+    return {
+        "mensaje": f"Has seleccionado el Bloque {seleccion.bloque}. ¿Qué tema quieres practicar?",
+        "opciones": temas_disponibles,
         "siguiente": {"endpoint": "/chatbot/seleccionar_tema"}
     }
 
-# ---------------------------
-# Selección de tema
-# ---------------------------
 @app.post("/chatbot/seleccionar_tema")
-def seleccionar_tema(data: SeleccionTema):
-    bloque = progreso_chatbot_col.find_one({"id_usuario": data.user_id}).get("bloque")
-    if bloque is None:
-        return {"mensaje": "Primero selecciona un bloque."}
+def seleccionar_tema(seleccion: SeleccionTema):
+    progreso = progreso_chatbot_col.find_one({"id_usuario": seleccion.user_id})
+    if not progreso or progreso.get("bloque") is None:
+        return {"error": "Primero debes seleccionar un bloque"}
 
-    temas_disponibles = list(preguntas[bloque].keys())
-    tema_lower = data.tema.lower()
+    bloque = progreso["bloque"]
+    tema = seleccion.tema.lower()
 
-    if tema_lower not in [t.lower() for t in temas_disponibles]:
-        return {"mensaje": f"Tema no válido. Temas disponibles: {', '.join(temas_disponibles)}"}
+    if tema not in preguntas[bloque]:
+        return {"error": f"Tema no válido para el Bloque {bloque}"}
+
+    preguntas_tema = obtener_preguntas_alternativas(bloque, tema, seleccion.user_id)
 
     progreso_chatbot_col.update_one(
-        {"id_usuario": data.user_id},
-        {"$set": {"tema": tema_lower, "indice_pregunta": 0, "correctas": 0}}
+        {"id_usuario": seleccion.user_id},
+        {"$set": {
+            "tema": tema,
+            "indice_pregunta": 0,
+            "correctas": 0,
+            "preguntas_actuales": [p["pregunta"] for p in preguntas_tema],
+            "fecha_ultima_interaccion": datetime.datetime.utcnow()
+        }}
     )
 
-    lista_preguntas = obtener_preguntas(bloque, tema_lower, data.user_id)
-    progreso_chatbot_col.update_one(
-        {"id_usuario": data.user_id},
-        {"$set": {"preguntas_actuales": lista_preguntas}}
-    )
+    primera_pregunta = preguntas_tema[0]
 
-    primera = lista_preguntas[0]
     return {
-        "mensaje": f"Perfecto 💡. Empecemos con el tema {tema_lower}.",
-        "pregunta": primera["pregunta"],
-        "opciones": primera["opciones"],
+        "mensaje": f"¡Empecemos con {tema}! Primera pregunta:",
+        "pregunta": primera_pregunta["pregunta"],
         "numero_pregunta": 1,
-        "total_preguntas": len(lista_preguntas),
+        "total_preguntas": len(preguntas_tema),
         "siguiente": {"endpoint": "/chatbot/responder"}
     }
 
-# ---------------------------
-# Responder preguntas
-# ---------------------------
 @app.post("/chatbot/responder")
-def responder(data: RespuestaUsuario):
-    progreso = progreso_chatbot_col.find_one({"id_usuario": data.user_id})
-    bloque = progreso.get("bloque")
-    tema = progreso.get("tema")
-    preguntas_actuales = progreso.get("preguntas_actuales", [])
+def responder_chatbot(respuesta: RespuestaUsuario):
+    progreso = progreso_chatbot_col.find_one({"id_usuario": respuesta.user_id})
+    if not progreso or progreso.get("tema") is None:
+        return {"error": "Primero debes seleccionar un bloque y un tema"}
+
+    bloque = progreso["bloque"]
+    tema = progreso["tema"]
     indice = progreso.get("indice_pregunta", 0)
+    correctas = progreso.get("correctas", 0)
 
-    if indice >= len(preguntas_actuales):
-        return {"mensaje": "Ya completaste este tema 🎉", "completado": True}
+    preguntas_tema = []
+    for pregunta_text in progreso.get("preguntas_actuales", []):
+        for p in preguntas[bloque][tema]:
+            if p["pregunta"] == pregunta_text:
+                preguntas_tema.append(p)
+                break
 
-    pregunta_actual = preguntas_actuales[indice]
-    respuesta_correcta = pregunta_actual["respuesta"].strip().lower()
-    respuesta_usuario = data.respuesta.strip().lower()
-
-    correcto = respuesta_usuario == respuesta_correcta
-
-    historial_preguntas_col.insert_one({
-        "id_usuario": data.user_id,
-        "bloque": bloque,
-        "tema": tema,
-        "pregunta": pregunta_actual["pregunta"],
-        "respuesta_usuario": respuesta_usuario,
-        "correcto": correcto,
-        "fecha": datetime.datetime.utcnow()
-    })
-
-    progreso_chatbot_col.update_one(
-        {"id_usuario": data.user_id},
-        {"$inc": {"indice_pregunta": 1, "correctas": 1 if correcto else 0}}
-    )
-
-    if indice + 1 >= len(preguntas_actuales):
+    if indice >= len(preguntas_tema):
+        progreso_chatbot_col.update_one(
+            {"id_usuario": respuesta.user_id},
+            {"$set": {
+                "tema": None,
+                "fecha_ultima_interaccion": datetime.datetime.utcnow()
+            }}
+        )
         return {
-            "mensaje": f"{'✅ Correcto' if correcto else '❌ Incorrecto'}.\nCompletaste todas las preguntas de este tema.",
+            "mensaje": f"¡Felicidades! Has completado todas las preguntas de {tema} en el Bloque {bloque}.",
+            "correctas": correctas,
+            "total_preguntas": len(preguntas_tema),
+            "opciones": ["Continuar", "Salir"],
+            "siguiente": {"endpoint": "/chatbot/seleccionar_bloque"},
             "completado": True
         }
 
-    siguiente_pregunta = preguntas_actuales[indice + 1]
-    return {
-        "mensaje": f"{'✅ Correcto' if correcto else '❌ Incorrecto'}.",
-        "pregunta": siguiente_pregunta["pregunta"],
-        "opciones": siguiente_pregunta["opciones"],
-        "numero_pregunta": indice + 2,
-        "total_preguntas": len(preguntas_actuales),
-        "siguiente": {"endpoint": "/chatbot/responder"},
-        "completado": False
-    }
+    pregunta_actual = preguntas_tema[indice]
+    respuesta_correcta = pregunta_actual["respuesta"]
 
-# ---------------------------
-# Ejecutar servidor
-# ---------------------------
+    if respuesta.respuesta.strip().lower() in ["listo", "ya", "listo!"]:
+        return {
+            "mensaje": "Continuemos con la pregunta:",
+            "pregunta": pregunta_actual["pregunta"],
+            "numero_pregunta": indice + 1,
+            "total_preguntas": len(preguntas_tema)
+        }
+
+    es_correcta = respuesta.respuesta.strip() == respuesta_correcta
+
+    respuestas_col.insert_one({
+        "id_usuario": respuesta.user_id,
+        "bloque": bloque,
+        "tema": tema,
+        "pregunta": pregunta_actual["pregunta"],
+        "respuesta_usuario": respuesta.respuesta,
+        "respuesta_correcta": respuesta_correcta,
+        "correcto": es_correcta,
+        "fecha": datetime.datetime.utcnow()
+    })
+
+    historial_preguntas_col.update_one(
+        {"id_usuario": respuesta.user_id,
+         "bloque": bloque,
+         "tema": tema,
+         "pregunta": pregunta_actual["pregunta"]},
+        {"$set": {"ultima_vez": datetime.datetime.utcnow()}},
+        upsert=True
+    )
+
+    if es_correcta:
+        nuevo_indice = indice + 1
+        nuevas_correctas = correctas + 1
+
+        progreso_chatbot_col.update_one(
+            {"id_usuario": respuesta.user_id},
+            {"$set": {
+                "indice_pregunta": nuevo_indice,
+                "correctas": nuevas_correctas,
+                "fecha_ultima_interaccion": datetime.datetime.utcnow()
+            }}
+        )
+
+        if nuevo_indice >= len(preguntas_tema):
+            progreso_chatbot_col.update_one(
+                {"id_usuario": respuesta.user_id},
+                {"$set": {
+                    "tema": None,
+                    "fecha_ultima_interaccion": datetime.datetime.utcnow()
+                }}
+            )
+            return {
+                "correcto": True,
+                "mensaje": f"¡Felicidades! Has completado todas las preguntas de {tema} en el Bloque {bloque}.",
+                "correctas": nuevas_correctas,
+                "total_preguntas": len(preguntas_tema),
+                "completado": True,
+                "siguiente": {"endpoint": "/chatbot/seleccionar_bloque"}
+            }
+
+        siguiente_pregunta = preguntas_tema[nuevo_indice]
+        return {
+            "correcto": True,
+            "mensaje": "¡Respuesta correcta! 🎉",
+            "siguiente_pregunta": siguiente_pregunta["pregunta"],
+            "numero_pregunta": nuevo_indice + 1,
+            "total_preguntas": len(preguntas_tema)
+        }
+    else:
+        return {
+            "correcto": False,
+            "mensaje": "¡No te preocupes! Todos nos equivocamos, es parte del aprendizaje. 💪",
+            "pregunta": pregunta_actual["pregunta"],
+            "numero_pregunta": indice + 1,
+            "total_preguntas": len(preguntas_tema)
+        }
+
 if __name__ == "__main__":
     import uvicorn
-    PORT = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
