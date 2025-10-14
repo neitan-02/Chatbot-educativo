@@ -6,7 +6,7 @@ import datetime
 import random
 import os
 from fastapi.middleware.cors import CORSMiddleware
-from preguntas import preguntas  # Tu archivo de preguntas
+from preguntas import preguntas  
 
 # ---------------------------
 # Configuración FastAPI
