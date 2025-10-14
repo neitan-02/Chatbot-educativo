@@ -20,16 +20,16 @@ app.add_middleware(
 )
 
 # ---------------------------
-# Conexión a MongoDB - CORREGIDO
+# Conexión a MongoDB
 # ---------------------------
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
-db = client["RetoMates"]  # Asegúrate que sea "RetoMates" exactamente
+db = client["RetoMates"]
 
 progreso_chatbot_col = db["progreso_chatbot"]
 respuestas_col = db["respuestas"]
 historial_preguntas_col = db["historial_preguntas"]
-users_col = db["users"]  # Esta colección debe existir
+users_col = db["users"]
 
 # ---------------------------
 # Modelos
@@ -51,10 +51,9 @@ class RespuestaUsuario(BaseModel):
     respuesta: str
 
 # ---------------------------
-# Funciones auxiliares - CORREGIDAS
+# Funciones auxiliares
 # ---------------------------
 def to_objectid(id_str: str):
-    """Convierte string a ObjectId de manera segura"""
     try:
         return ObjectId(id_str)
     except:
@@ -84,13 +83,28 @@ def es_usuario_nuevo(user_id: str) -> bool:
     return progreso_chatbot_col.find_one({"id_usuario": user_id}) is None
 
 def obtener_nombre_usuario(user_id: str) -> str:
-    usuario = users_col.find_one({"_id": to_objectid(user_id)})
-    if usuario:
-        return usuario.get("username", "Usuario")
-    progreso = progreso_chatbot_col.find_one({"id_usuario": user_id})
-    if progreso and "nombre" in progreso:
-        return progreso["nombre"]
-    return "Usuario"
+    """Obtiene el username real del usuario desde la colección users"""
+    try:
+        object_id = to_objectid(user_id)
+        if object_id:
+            usuario = users_col.find_one({"_id": object_id})
+            if usuario and "username" in usuario:
+                return usuario["username"]
+        
+        # Si no encuentra por ObjectId, buscar por string
+        usuario = users_col.find_one({"_id": user_id})
+        if usuario and "username" in usuario:
+            return usuario["username"]
+            
+        # Si aún no encuentra, buscar en progreso_chatbot_col
+        progreso = progreso_chatbot_col.find_one({"id_usuario": user_id})
+        if progreso and "nombre" in progreso:
+            return progreso["nombre"]
+            
+        return "Usuario"
+    except Exception as e:
+        print(f"Error obteniendo nombre de usuario: {e}")
+        return "Usuario"
 
 # ---------------------------
 # Endpoints de chatbot - CORREGIDOS
@@ -99,77 +113,40 @@ def obtener_nombre_usuario(user_id: str) -> str:
 def read_root():
     return {"message": "Chatbot API funcionando correctamente"}
 
-@app.get("/debug/database")
-def debug_database():
-    """Endpoint para debug de la base de datos"""
-    try:
-        databases = client.list_database_names()
-        collections = db.list_collection_names()
-        users_count = users_col.count_documents({})
-        
-        # Mostrar algunos usuarios de ejemplo
-        sample_users = list(users_col.find({}, {"username": 1, "email": 1}).limit(3))
-        
-        return {
-            "databases": databases,
-            "collections": collections,
-            "total_usuarios": users_count,
-            "usuarios_ejemplo": sample_users,
-            "status": "Conexión exitosa"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/debug/usuario/{user_id}")
-def debug_usuario(user_id: str):
-    """Endpoint para debug de usuario específico"""
-    try:
-        object_id = to_objectid(user_id)
-        usuario = users_col.find_one({"_id": object_id})
-        
-        return {
-            "user_id_recibido": user_id,
-            "object_id_convertido": str(object_id) if object_id else "No válido",
-            "usuario_encontrado": bool(usuario),
-            "usuario": usuario
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
 @app.get("/chatbot/inicio/{user_id}")
 def iniciar_chatbot(user_id: str):
     try:
         print(f"🔍 Buscando usuario con ID: {user_id}")
         
-        # Convertir user_id a ObjectId
+        # Obtener el nombre de usuario REAL
+        nombre_usuario_real = obtener_nombre_usuario(user_id)
+        print(f"✅ Nombre de usuario encontrado: {nombre_usuario_real}")
+        
+        # Convertir user_id a ObjectId para buscar en users
         object_id = to_objectid(user_id)
-        if not object_id:
-            return {"error": f"ID de usuario no válido: {user_id}"}
         
         # Buscar usuario en la colección users
-        usuario_existe = users_col.find_one({"_id": object_id})
-        print(f"✅ Usuario encontrado: {usuario_existe is not None}")
+        usuario_existe = None
+        if object_id:
+            usuario_existe = users_col.find_one({"_id": object_id})
         
+        # Si no encuentra por ObjectId, buscar por string
         if not usuario_existe:
-            # Crear usuario automáticamente si no existe (para testing)
-            nuevo_usuario = {
-                "_id": object_id,
-                "username": f"Usuario_{user_id[:6]}",
-                "email": f"auto_{user_id}@temp.com",
-                "fecha_creacion": datetime.datetime.utcnow(),
-                "auto_creado": True
-            }
-            users_col.insert_one(nuevo_usuario)
-            usuario_existe = nuevo_usuario
-            print("🆕 Usuario creado automáticamente")
+            usuario_existe = users_col.find_one({"_id": user_id})
+        
+        # Si el usuario no existe en users, crear uno temporal
+        if not usuario_existe:
+            print("⚠️ Usuario no encontrado en colección users, usando datos del chatbot")
+            # No creamos usuario automáticamente, usamos el nombre obtenido
+        else:
+            print(f"✅ Usuario encontrado en BD: {usuario_existe.get('username', 'No username')}")
 
         # Verificar si es usuario nuevo en el chatbot
         if es_usuario_nuevo(user_id):
-            nombre_usuario = usuario_existe.get("username", "Usuario")
             progreso_chatbot_col.update_one(
                 {"id_usuario": user_id},
                 {"$set": {
-                    "nombre": nombre_usuario,
+                    "nombre": nombre_usuario_real,
                     "fecha_primer_acceso": datetime.datetime.utcnow(),
                     "fecha_ultima_interaccion": datetime.datetime.utcnow(),
                     "bloque": None,
@@ -181,7 +158,7 @@ def iniciar_chatbot(user_id: str):
                 upsert=True
             )
             return {
-                "mensaje": f"¡Hola {nombre_usuario}! Bienvenido a RetoMate 🎉. ¿Qué bloque quieres practicar hoy?",
+                "mensaje": f"¡Hola {nombre_usuario_real}! Bienvenido a RetoMate 🎉. ¿Qué bloque quieres practicar hoy?",
                 "opciones": ["1", "2", "3", "4"],
                 "siguiente": {"endpoint": "/chatbot/seleccionar_bloque"},
                 "tema_en_progreso": None,
@@ -189,14 +166,13 @@ def iniciar_chatbot(user_id: str):
                 "usuario_nuevo": True
             }
 
-        # Usuario existente
+        # Usuario existente - usar el nombre real
         progreso = progreso_chatbot_col.find_one({"id_usuario": user_id})
-        nombre_usuario = obtener_nombre_usuario(user_id)
         
         if progreso and progreso.get("tema"):
-            mensaje = f"¡Bienvenido de vuelta {nombre_usuario}! Estabas practicando {progreso['tema']} en el Bloque {progreso['bloque']}."
+            mensaje = f"¡Bienvenido de vuelta {nombre_usuario_real}! Estabas practicando {progreso['tema']} en el Bloque {progreso['bloque']}."
         else:
-            mensaje = f"¡Bienvenido de vuelta {nombre_usuario}! ¿Qué quieres practicar hoy?"
+            mensaje = f"¡Bienvenido de vuelta {nombre_usuario_real}! ¿Qué quieres practicar hoy?"
             
         return {
             "mensaje": mensaje,
@@ -287,8 +263,11 @@ def seleccionar_tema(seleccion: SeleccionTema):
 
         primera_pregunta = preguntas_tema[0]
 
+        # CORREGIDO: El mensaje ahora incluye directamente la pregunta
+        mensaje_completo = f"¡Empecemos con {tema}!\n\n{primera_pregunta['pregunta']}"
+
         return {
-            "mensaje": f"¡Empecemos con {tema}! Primera pregunta:",
+            "mensaje": mensaje_completo,
             "pregunta": primera_pregunta["pregunta"],
             "numero_pregunta": 1,
             "total_preguntas": len(preguntas_tema),
@@ -338,7 +317,7 @@ def responder_chatbot(respuesta: RespuestaUsuario):
 
         if respuesta.respuesta.strip().lower() in ["listo", "ya", "listo!"]:
             return {
-                "mensaje": "Continuemos con la pregunta:",
+                "mensaje": f"Continuemos con la pregunta:\n\n{pregunta_actual['pregunta']}",
                 "pregunta": pregunta_actual["pregunta"],
                 "numero_pregunta": indice + 1,
                 "total_preguntas": len(preguntas_tema)
@@ -399,7 +378,7 @@ def responder_chatbot(respuesta: RespuestaUsuario):
             siguiente_pregunta = preguntas_tema[nuevo_indice]
             return {
                 "correcto": True,
-                "mensaje": "¡Respuesta correcta! 🎉",
+                "mensaje": f"¡Respuesta correcta! 🎉\n\nSiguiente pregunta:\n\n{siguiente_pregunta['pregunta']}",
                 "siguiente_pregunta": siguiente_pregunta["pregunta"],
                 "numero_pregunta": nuevo_indice + 1,
                 "total_preguntas": len(preguntas_tema)
@@ -407,7 +386,7 @@ def responder_chatbot(respuesta: RespuestaUsuario):
         else:
             return {
                 "correcto": False,
-                "mensaje": "¡No te preocupes! Todos nos equivocamos, es parte del aprendizaje. 💪",
+                "mensaje": f"¡No te preocupes! Todos nos equivocamos, es parte del aprendizaje. 💪\n\nIntenta nuevamente:\n\n{pregunta_actual['pregunta']}",
                 "pregunta": pregunta_actual["pregunta"],
                 "numero_pregunta": indice + 1,
                 "total_preguntas": len(preguntas_tema)
