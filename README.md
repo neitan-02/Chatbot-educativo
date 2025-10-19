@@ -1,5 +1,5 @@
 # RetoMate Chatbot
-Un chatbot educativo usado por el proyecto [RetoMate]() para practicar ejercicios de matemáticas de forma interactiva.
+Un chatbot educativo usado por el proyecto [RetoMate](https://github.com/luisillo2048/RetoMate) para practicar ejercicios de matemáticas de forma interactiva.
 
 > Nota: Este servicio se ejecuta en paralelo al proyecto principal y expone endpoints HTTP que el frontend o backend pueden consumir.
 
